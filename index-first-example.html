@@ -1,0 +1,178 @@
+<!--
+    Exemplo: usando a IA embutida do Chrome (Prompt API / Gemini Nano)
+
+    Fluxo geral:
+      1. Verifica se o navegador oferece a Prompt API (objeto global LanguageModel)
+      2. Consulta se o modelo está disponível, precisa ser baixado ou não é suportado
+      3. Se já estiver baixado  -> faz a pergunta automaticamente
+         Se precisar de download -> mostra um botão (o Chrome exige um clique do usuário)
+      4. Cria uma sessão com o modelo e envia a pergunta
+      5. Recebe a resposta em streaming (pedaço por pedaço) e renderiza como Markdown
+-->
+
+<!-- Botão exibido apenas quando o modelo ainda precisa ser baixado -->
+<button id="start" hidden>Baixar modelo e perguntar</button>
+
+<!-- Área onde mensagens de status e a resposta da IA são exibidas -->
+<output id="output"></output>
+
+<!-- Biblioteca para converter o texto em Markdown retornado pela IA em HTML -->
+<!-- https://www.jsdelivr.com/package/npm/markdown -->
+<script src="https://cdn.jsdelivr.net/npm/markdown@0.5.0/lib/markdown.min.js"></script>
+
+<script>
+    // =====================================================================
+    // 1. Elementos da página
+    // =====================================================================
+    const output = document.getElementById('output');
+    const startButton = document.getElementById('start');
+
+    // Atalho para mostrar mensagens de status/resultado na tela
+    function showMessage(html) {
+        output.innerHTML = html;
+    }
+
+    // =====================================================================
+    // 2. Configuração da conversa
+    // =====================================================================
+
+    // Prompt de sistema: define o "comportamento" do assistente
+    // para toda a sessão, antes de qualquer pergunta do usuário.
+    const initialPrompts = [
+        {
+            role: 'system',
+            content: `Você é um assistente de IA que responde de forma clara e objetiva.`
+        }
+    ];
+
+    // Pergunta que será enviada ao modelo
+    const question = 'Quem inventou o JavaScript?';
+
+    // =====================================================================
+    // 3. Funções auxiliares
+    // =====================================================================
+
+    /**
+     * Lê os parâmetros padrão do modelo (temperature e topK).
+     *
+     * Atenção: no Chrome 138+, LanguageModel.params() e as opções
+     * temperature/topK só existem em extensões do Chrome ou com origin trial.
+     * Numa página web comum ela não existe, então retornamos {} e o modelo
+     * usa seus próprios valores padrão.
+     */
+    async function getSamplingOptions() {
+        if (typeof LanguageModel.params !== 'function') {
+            console.log('LanguageModel.params() indisponível, usando valores padrão do modelo.');
+            return {};
+        }
+
+        const params = await LanguageModel.params();
+        console.log('Language Model Params:', params);
+
+        return {
+            temperature: params.defaultTemperature, // aleatoriedade da resposta
+            topK: params.defaultTopK,               // quantos tokens candidatos considerar
+        };
+    }
+
+    /**
+     * Cria uma sessão com o modelo.
+     *
+     * Se o modelo ainda não estiver no dispositivo, esta chamada dispara o
+     * download. O "monitor" permite acompanhar o progresso desse download.
+     */
+    async function createSession(samplingOptions) {
+        return LanguageModel.create({
+            expectedInputLanguages: ['pt'], // idioma das entradas que vamos enviar
+            ...samplingOptions,             // temperature/topK, se disponíveis
+            initialPrompts,                 // prompt de sistema definido acima
+            monitor(m) {
+                m.addEventListener('downloadprogress', (e) => {
+                    // e.loaded vai de 0 a 1
+                    showMessage(`Baixando modelo... ${Math.round(e.loaded * 100)}%`);
+                });
+            },
+        });
+    }
+
+    /**
+     * Envia a pergunta e mostra a resposta conforme ela vai sendo gerada.
+     *
+     * promptStreaming() devolve um stream: em vez de esperar a resposta
+     * inteira, recebemos pedaços (tokens) e atualizamos a tela a cada um.
+     */
+    async function askAndRender(session) {
+        showMessage('Gerando resposta...');
+
+        const responseStream = session.promptStreaming([
+            { role: 'user', content: question }
+        ]);
+
+        let fullText = '';
+        for await (const chunk of responseStream) {
+            fullText += chunk;
+            // Re-renderiza o texto acumulado como Markdown -> HTML
+            showMessage(markdown.toHTML(fullText));
+        }
+    }
+
+    /**
+     * Fluxo completo: cria a sessão (baixando o modelo se preciso)
+     * e depois faz a pergunta.
+     */
+    async function run(samplingOptions) {
+        showMessage('Preparando modelo...');
+        const session = await createSession(samplingOptions);
+        await askAndRender(session);
+    }
+
+    // =====================================================================
+    // 4. Ponto de entrada: executado assim que a página carrega
+    // =====================================================================
+    (async () => {
+        // 4.1 O navegador suporta a Prompt API?
+        if (!('LanguageModel' in self)) {
+            showMessage('Prompt API (LanguageModel) não está disponível neste navegador.');
+            return;
+        }
+
+        // 4.2 Qual o estado do modelo neste dispositivo?
+        //   'available'    -> já baixado, pronto para uso
+        //   'downloadable' -> suportado, mas precisa ser baixado
+        //   'downloading'  -> download em andamento
+        //   'unavailable'  -> hardware/navegador não suportam
+        const availability = await LanguageModel.availability();
+        console.log('Language Model Availability:', availability);
+
+        if (availability === 'unavailable') {
+            showMessage('O modelo não está disponível neste dispositivo.');
+            return;
+        }
+
+        const samplingOptions = await getSamplingOptions();
+
+        // 4.3 Modelo pronto: faz a pergunta direto
+        if (availability === 'available') {
+            await run(samplingOptions);
+            return;
+        }
+
+        // 4.4 Modelo precisa ser baixado: o Chrome só permite iniciar o
+        // download a partir de um gesto do usuário (ex.: clique). Por isso
+        // a chamada a LanguageModel.create() fica dentro do evento de clique.
+        showMessage('O modelo precisa ser baixado. Clique no botão para começar.');
+        startButton.hidden = false;
+
+        startButton.addEventListener('click', async () => {
+            startButton.disabled = true; // evita cliques repetidos
+            try {
+                await run(samplingOptions);
+                startButton.hidden = true;
+            } catch (error) {
+                console.error(error);
+                showMessage(`Erro: ${error.message}`);
+                startButton.disabled = false; // permite tentar de novo
+            }
+        });
+    })();
+</script>
